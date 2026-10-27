@@ -108,22 +108,24 @@ let state = {
 };
 
 // ==========================================
-// GERENCIAMENTO BLINDADO DA SESSÃO (F5)
+// GERENCIAMENTO BLINDADO DA SESSÃO (1 POR DIA)
 // ==========================================
 
 function saveSession() {
   localStorage.setItem('tmfleet_session', JSON.stringify({
     role: state.role,
     driverId: state.driverId,
-    time: Date.now()
+    dataLogin: new Date().toLocaleDateString('pt-BR') // Salva o dia exato (ex: "20/10/2026")
   }));
 }
 
 function loadSession() {
   try {
     const sess = JSON.parse(localStorage.getItem('tmfleet_session'));
-    // Mantém logado por 24 horas e valida se o motorista ainda existe na base
-    if (sess && sess.time && (Date.now() - sess.time < 86400000)) {
+    const hoje = new Date().toLocaleDateString('pt-BR');
+    
+    // Mantém logado APENAS se a data salva for igual ao dia de hoje
+    if (sess && sess.dataLogin === hoje) {
       state.role = sess.role;
       state.driverId = sess.driverId;
       state.screen = 'main';
@@ -133,9 +135,6 @@ function loadSession() {
 }
 
 // Executa a carga da sessão imediatamente na leitura do script
-loadSession();
-
-// Carrega a memória antes de renderizar a primeira vez
 loadSession();
 
 const app = document.getElementById('app');
@@ -153,14 +152,28 @@ async function syncWithSheets() {
 }
 
 async function loadFromSheets() {
-  if (!API_URL || !API_URL.startsWith('http')) return;
+  if (typeof API_URL === 'undefined' || !API_URL || !API_URL.startsWith('http')) {
+    console.warn("⚠️ ATENÇÃO: A variável API_URL não está configurada ou é inválida no seu trmfleet.js!");
+    return;
+  }
+  
   try {
+    console.log("🔄 Tentando buscar dados na API do Google Sheets...");
     const res = await fetch(API_URL + '?action=getAll');
     const remote = await res.json();
     
+    console.log("📥 Dados brutos recebidos do Google Sheets:", remote);
+    
+    if (!remote || remote.error) {
+      console.error("❌ A API respondeu com erro:", remote ? remote.error : "Resposta vazia");
+      return;
+    }
+
+    if (typeof data === 'undefined') window.data = {};
+
     if (remote.vehicles && remote.vehicles.length > 0) {
       data.vehicles = remote.vehicles.map(v => ({
-        id: String(v.id_veiculo || uid()), 
+        id: String(v.id_veiculo || (typeof uid === 'function' ? uid() : 'v_' + Math.random())), 
         ident: v.prefixo, 
         placa: v.placa, 
         modelo: v.modelo,
@@ -169,19 +182,19 @@ async function loadFromSheets() {
         km: Number(v.km_atual), 
         status: v.status_veiculo,
         ativo: String(v.ativo).toLowerCase() === 'true',
-        motoristaId: v.veiculo_fixo_id ? String(v.veiculo_fixo_id) : null,
+        motoristaId: null, 
         tipoDiesel: v.tipo_diesel, 
         utilizaArla: String(v.utiliza_arla).toLowerCase() !== 'false',
         capacidadeTanqueDiesel: Number(v.cap_diesel), 
         capacidadeTanqueArla: Number(v.cap_arla),
         tipoTacografo: v.tipo_tacografo
       }));
-      vehicles = data.vehicles;
+      if (typeof vehicles !== 'undefined') vehicles = data.vehicles;
     }
     
     if (remote.drivers && remote.drivers.length > 0) {
       data.drivers = remote.drivers.map(d => ({
-        id: String(d.id_motorista || uid()), 
+        id: String(d.id_motorista || (typeof uid === 'function' ? uid() : 'd_' + Math.random())), 
         nome: d.nome, 
         matricula: d.matricula, 
         cpf: d.cpf,
@@ -192,7 +205,16 @@ async function loadFromSheets() {
         user: d.usuario_login, 
         senha: d.senha
       }));
-      drivers = data.drivers;
+      if (typeof drivers !== 'undefined') drivers = data.drivers;
+    }
+
+    if (data.vehicles && data.drivers) {
+      data.drivers.forEach(d => {
+        if (d.veiculoId) {
+          const v = data.vehicles.find(x => String(x.id) === String(d.veiculoId));
+          if (v) v.motoristaId = d.id;
+        }
+      });
     }
     
     if (remote.checks && remote.checks.length > 0) {
@@ -226,26 +248,40 @@ async function loadFromSheets() {
     
     if (remote.fuels && remote.fuels.length > 0) {
       data.fuels = remote.fuels.map(f => ({
-        id: String(f.id_abastecimento), 
+        id: String(f.id_abastecimento || (typeof uid === 'function' ? uid() : 'f_' + Math.random())), 
         protocolo: f.protocolo, 
         veiculoId: String(f.id_veiculo),
-        motoristaId: String(f.id_motorista), 
+        motoristaId: String(f.id_motorista || ''), 
         date: f.data, 
         hora: f.hora, 
         km: Number(f.km_atual),
         tipoDiesel: f.tipo_diesel, 
         litrosDiesel: Number(f.litros_diesel), 
         valorDiesel: Number(f.valor_diesel),
-        litrosArla: Number(f.litros_arla), 
-        valorArla: Number(f.valor_arla)
+        litrosArla: Number(f.litros_arla || 0), 
+        valorArla: Number(f.valor_arla || 0)
       }));
       data.abastecimentos = data.fuels;
+      console.log(`✅ Abastecimentos carregados com sucesso: ${data.fuels.length} registros.`);
+    } else {
+      console.warn("⚠️ O objeto 'fuels' veio vazio ou não existe na resposta do Apps Script.");
     }
 
-    localStorage.setItem(KEY, JSON.stringify(data));
-    render();
+    if (typeof KEY !== 'undefined') {
+      localStorage.setItem(KEY, JSON.stringify(data));
+    }
+    
+    if (typeof render === 'function') {
+      render();
+    }
+
+    if (typeof renderFuelCharts === 'function') {
+      setTimeout(renderFuelCharts, 150);
+    }
+
   } catch (err) {
-    console.warn('Usando base local:', err);
+    console.error('❌ Erro crítico ao conectar com o Google Sheets:', err);
+    if (typeof render === 'function') render();
   }
 }
 
@@ -359,12 +395,15 @@ function login() {
 
 function layout(content) {
   const gestor = state.role === 'gestor';
+  
+  // 🎯 MUDANÇA: Aba "Avaliação" removida do array do Motorista
   const nav = gestor
     ? ['dashboard', 'fleet', 'drivers', 'issues', 'checks', 'fuels', 'ratings']
-    : ['home', 'new', 'fuel', 'history', 'profile', 'operation', 'behavior'];
+    : ['home', 'new', 'fuel', 'history', 'profile', 'operation'];
+    
   const labels = gestor
-    ? ['📊 Dashboard', '🚛 Veículos', '👤 Motoristas', '🚨 Pendências', '📋 Checklists', '⛽ Abastecimentos', '⭐ Avaliações']
-    : ['🏠 Início', '📋 Checklist', '⛽ Abastecimento', '📚 Histórico', '👤 Perfil', '🚚 Operação', '⭐ Avaliação'];
+    ? ['📊 Dashboard', '🚛 Veículos', '👤 Motoristas', '🚨 Pendências', '📋 Checklists', '⛽ Abastecimentos', '🚛 Avaliações']
+    : ['🏠 Início', '📋 Checklist', '⛽ Abastecimento', '📚 Histórico', '👤 Perfil', '🚚 Operação'];
 
   const navButtons = nav.map((n, i) => {
     const active = state.view === n ? 'active' : '';
@@ -382,15 +421,31 @@ function layout(content) {
     ? `<footer class="bottom"><div class="bottom-inner" style="max-width:1120px;grid-template-columns:repeat(${nav.length},minmax(0,1fr))">${bottomButtons}</div></footer>`
     : '';
 
+  // 🎯 MUDANÇA: Topbar atualizada
+  // Gestor vê o selo normal. Motorista vê o Nome + Pontuação com o Caminhãozinho
+  let userBadge = '';
+  if (gestor) {
+    userBadge = `<span class="pill" style="background:#282c2f;color:#fff">GESTOR</span>`;
+  } else {
+    const d = driver();
+    const primeiroNome = d ? d.nome.split(' ')[0] : 'Motorista';
+    // Na Fase 3 implementaremos a busca real dos pontos. Por enquanto, mockamos os 100 pontos.
+    userBadge = `
+      <div class="pill" style="background:#282c2f; color:#fff; border:none;">
+        👤 ${primeiroNome} <span style="color:#00D2FF; margin-left:8px; font-weight:900;">100 🚛</span>
+      </div>
+    `;
+  }
+
   return `
     <header class="topbar">
       <div>
         <div class="brand">TRANSMARINA FLEET</div>
-        <div class="tag">Gestão inteligente da frota · v1.4</div>
+        <div class="tag">Gestão inteligente da frota · v1.5</div>
       </div>
       <div class="top-actions">
-        <span class="pill" style="background:#282c2f;color:#fff">${gestor ? 'GESTOR' : 'MOTORISTA'}</span>
-        <button class="iconbtn" onclick="logout()">↪</button>
+        ${userBadge}
+        <button class="iconbtn" onclick="logout()" title="Sair">↪</button>
       </div>
     </header>
     <main class="shell">
@@ -1044,17 +1099,23 @@ function autoMatricula(val) {
 }
 
 function driverAdmin() {
-  const rowsHtml = drivers.map(d => `
+  const rowsHtml = drivers.map(d => {
+    const v = veh(d.veiculoId);
+    // Mostra a placa, e se não tiver placa cadastrada, mostra o prefixo
+    const placaCaminhao = v ? (v.placa || v.ident) : 'Sem veículo';
+    
+    return `
     <div class="card listrow">
       <div class="main">
         <strong>${d.nome}</strong>
-        <span>${d.matricula} · ${veh(d.veiculoId)?.ident || 'Sem veículo'} · Login: ${d.user || '—'}</span>
+        <span>${d.matricula} · ${placaCaminhao} · Login: ${d.user || '—'}</span>
       </div>
       <div style="display:flex;align-items:center;gap:12px">
         <span class="pill ${d.status === 'Ativo' ? 'ok' : 'bad'}">${d.status}</span>
         <button class="secondary" style="padding:8px 12px;font-size:12px" onclick="driverForm('${d.id}')">EDITAR</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   return `
     <div class="hero">
@@ -1066,7 +1127,9 @@ function driverAdmin() {
 
 function driverForm(id) {
   const d = id ? driverBy(id) : { id: '', nome: '', matricula: '', cpf: '', telefone: '', veiculoId: '', user: '', senha: '123456', status: 'Ativo' };
-  const vOpts = vehicles.map(v => `<option value="${v.id}" ${String(v.id) === String(d.veiculoId) ? 'selected' : ''}>${v.ident}</option>`).join('');
+  
+  // MUDANÇA: Agora o `<option>` do select exibe a PLACA do caminhão ao invés do prefixo
+  const vOpts = vehicles.map(v => `<option value="${v.id}" ${String(v.id) === String(d.veiculoId) ? 'selected' : ''}>${v.placa || v.ident}</option>`).join('');
   const stOpts = ['Ativo', 'Inativo'].map(x => `<option ${d.status === x ? 'selected' : ''}>${x}</option>`).join('');
   
   const btnDelete = id ? `<button class="danger" onclick="deleteDriver('${id}')">EXCLUIR</button>` : '';
@@ -1082,7 +1145,7 @@ function driverForm(id) {
         <div class="field"><label>CPF</label><input id="df-cpf" value="${d.cpf}" oninput="autoMatricula(this.value)" placeholder="Apenas números"></div>
         <div class="field"><label>Matrícula</label><input id="df-mat" value="${d.matricula}"></div>
         <div class="field"><label>Telefone</label><input id="df-tel" value="${d.telefone}"></div>
-        <div class="field"><label>Veículo vinculado</label><select id="df-veh"><option value="">Sem veículo</option>${vOpts}</select></div>
+        <div class="field"><label>Veículo vinculado (Placa)</label><select id="df-veh"><option value="">Sem veículo</option>${vOpts}</select></div>
         <div class="field"><label>Status de acesso</label><select id="df-status">${stOpts}</select></div>
         <div class="field"><label>Usuário (Login)</label><input id="df-user" value="${d.user}"></div>
         <div class="field"><label>Senha</label><input id="df-pass" value="${d.senha}"></div>
@@ -1254,26 +1317,622 @@ function checkDetail() {
       </div>`; 
 }
 
-function fuelAdmin() { 
-    const rowsHtml = data.fuels.map(f => `
-      <tr>
-        <td>${br(f.date)} ${f.hora || ''}</td>
-        <td>${veh(f.veiculoId)?.ident || '—'}</td>
-        <td>${driverBy(f.motoristaId)?.nome || 'Robô / Posto'}</td>
-        <td>${f.tipoDiesel || 'Diesel S10'}</td>
-        <td>${f.litrosDiesel} L</td>
-        <td>R$ ${Number(f.valorDiesel || 0).toFixed(2)}</td>
-        <td>${km(f.km)}</td>
-      </tr>`).join('') || '<tr><td colspan="7">Nenhum abastecimento registrado.</td></tr>'; 
+// ==========================================
+// PAINEL DE ABASTECIMENTOS AVANÇADO (GRÁFICOS)
+// ==========================================
+
+let chartInstances = {}; // Guarda a memória dos gráficos para atualizar ao filtrar
+
+
+// ==========================================
+// PAINEL DE ABASTECIMENTOS AVANÇADO 
+// (Mantém F1, Mesclado, Filtros, Brilho e Projeção Inteligente)
+// ==========================================
+
+let mainFuelChart = null;
+
+function loadChartJs(callback) {
+  if (window.Chart) return callback();
+  const script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/chart.js';
+  script.onload = callback;
+  document.head.appendChild(script);
+}
+
+
+// ==========================================
+// PLUGIN DE GLOW INTELIGENTE APRIMORADO
+// ==========================================
+const glowPlugin = {
+  id: 'glowOnHover',
+  beforeDatasetDraw: (chart, args) => {
+    const active = chart.getActiveElements();
+    if (!active || active.length === 0) return;
+
+    const activeDsIndex = active[0].datasetIndex;
+    const meta = chart.getDatasetMeta(args.index);
+    const ctx = chart.ctx;
+
+    ctx.save();
+
+    if (args.index !== activeDsIndex) {
+      // Apaga os datasets que não estão em foco
+      ctx.globalAlpha = 0.2;
+    } else {
+      if (meta.type === 'bar') {
+        // Se for barra, apaga o grupo inicial (acenderemos uma a uma depois)
+        ctx.globalAlpha = 0.2;
+      } else {
+        // Se for linha, acende a linha inteira com a cor correta
+        const ds = chart.data.datasets[args.index];
+        let color = ds.borderColor || ds.backgroundColor || '#00D2FF';
+        if (Array.isArray(color)) color = color[active[0].index] || color[0] || '#00D2FF';
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 15;
+      }
+    }
+  },
+  afterDatasetDraw: (chart, args) => {
+    chart.ctx.restore();
+
+    const active = chart.getActiveElements();
+    if (!active || active.length === 0) return;
+
+    const activeDsIndex = active[0].datasetIndex;
+    const meta = chart.getDatasetMeta(args.index);
+
+    // Redesenha as barras focadas com opacidade 100% e Neon
+    if (meta.type === 'bar' && args.index === activeDsIndex) {
+      const ctx = chart.ctx;
+      const ds = chart.data.datasets[args.index];
       
-    return `
-      <div class="hero"><div><div class="eyebrow">⛽ ABASTECIMENTOS</div><h1>Abastecimentos</h1></div></div>
-      <div class="card table-wrap">
-        <table class="table">
-          <thead><tr><th>Data/Hora</th><th>Veículo</th><th>Motorista</th><th>Diesel</th><th>Litros</th><th>Valor</th><th>KM</th></tr></thead>
-          <tbody>${rowsHtml}</tbody>
-        </table>
-      </div>`; 
+      active.forEach(act => {
+        if (act.datasetIndex === activeDsIndex) {
+          const activeEl = meta.data[act.index];
+          const val = ds.data[act.index]; // Pega o valor real do dia
+          
+          // 🎯 O SEGREDO: Só aplica neon se a barra tiver um valor maior que zero!
+          if (activeEl && val > 0) {
+            ctx.save();
+            let color = ds.borderColor || ds.backgroundColor || '#00D2FF';
+            if (Array.isArray(color)) color = color[act.index] || color[0] || '#00D2FF';
+            
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 15;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 0;
+            ctx.globalAlpha = 1.0;
+
+            activeEl.draw(ctx);
+            ctx.restore();
+          }
+        }
+      });
+    }
+  }
+};
+
+
+// ==========================================
+// FASE 2: MOTOR DE DATAS, FLATPICKR E EIXO X CORRIGIDO
+// ==========================================
+
+// Injeta o calendário interativo (Flatpickr) dinamicamente
+function loadFlatpickr(callback) {
+  if (window.flatpickr) return callback();
+  const css = document.createElement('link');
+  css.rel = 'stylesheet';
+  css.href = 'https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css';
+  document.head.appendChild(css);
+  
+  const script = document.createElement('script');
+  script.src = 'https://cdn.jsdelivr.net/npm/flatpickr';
+  script.onload = () => {
+    const ptScript = document.createElement('script');
+    ptScript.src = 'https://npmcdn.com/flatpickr/dist/l10n/pt.js';
+    ptScript.onload = callback;
+    document.head.appendChild(ptScript);
+  };
+  document.head.appendChild(script);
+}
+
+// Aplica atalhos rápidos de data no filtro
+function applyPresetDate() {
+  const val = document.getElementById('fuel-preset-dates').value;
+  if (!val) return;
+  
+  const end = new Date();
+  let start = new Date();
+  
+  if (val === '30') {
+    start.setDate(end.getDate() - 30);
+  } else if (val === '90') {
+    start.setDate(end.getDate() - 90);
+  } else if (val === 'thisMonth') {
+    start.setDate(1);
+  }
+  
+  state.fuelStart = start.toISOString().split('T')[0];
+  state.fuelEnd = end.toISOString().split('T')[0];
+  
+  const fp = document.getElementById('fuel-date-range')._flatpickr;
+  if (fp) fp.setDate([state.fuelStart, state.fuelEnd]);
+  
+  renderFuelCharts();
+}
+
+function fuelAdmin() { 
+  // Garante datas padrão na memória do sistema (Últimos 30 dias)
+  if (!state.fuelStart || !state.fuelEnd) {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    state.fuelStart = d.toISOString().split('T')[0];
+    state.fuelEnd = new Date().toISOString().split('T')[0];
+  }
+
+  // Carrega o calendário novo e o Chart.js
+  setTimeout(() => {
+    loadFlatpickr(() => {
+      flatpickr("#fuel-date-range", {
+        mode: "range",
+        dateFormat: "Y-m-d",
+        locale: "pt",
+        defaultDate: [state.fuelStart, state.fuelEnd],
+        onClose: function(selectedDates) {
+          if (selectedDates.length === 2) {
+            state.fuelStart = selectedDates[0].toISOString().split('T')[0];
+            state.fuelEnd = selectedDates[1].toISOString().split('T')[0];
+          }
+        }
+      });
+    });
+    if (typeof loadChartJs === 'function') loadChartJs(renderFuelCharts);
+    else renderFuelCharts();
+  }, 150);
+
+  return `
+    <div class="hero">
+      <div><div class="eyebrow">⛽ ABASTECIMENTOS</div><h1>Análise e Projeção de Gastos</h1></div>
+    </div>
+    
+    <div class="card" style="margin-bottom: 16px;">
+      <div class="form-grid" style="grid-template-columns: 1fr 1.5fr 1fr auto; gap: 12px; margin: 0; align-items: end;">
+        <div class="field" style="margin: 0;">
+          <label>Visualização:</label>
+          <select id="fuel-chart-type" onchange="renderFuelCharts()">
+            <option value="line">F1 + Projeção (60 Dias)</option>
+            <option value="bar">Gasto Real (Barras)</option>
+            <option value="mixed">Ambos (Mesclado)</option>
+          </select>
+        </div>
+        
+        <div class="field" style="margin: 0;">
+          <label>Período (Início até Fim):</label>
+          <!-- 🎯 CORRIGIDO: Removido o SVG inline problemático que estava vazando texto -->
+          <input type="text" id="fuel-date-range" placeholder="Selecione as datas..." style="background:#fff; cursor:pointer;" readonly>
+        </div>
+
+        <div class="field" style="margin: 0;">
+          <label>Datas fixas:</label>
+          <select id="fuel-preset-dates" onchange="applyPresetDate()">
+            <option value="">Personalizado</option>
+            <option value="30">Últimos 30 dias</option>
+            <option value="90">Últimos 3 meses</option>
+            <option value="thisMonth">Este mês</option>
+          </select>
+        </div>
+        
+        <button class="primary" style="padding: 13px 20px;" onclick="renderFuelCharts()">FILTRAR</button>
+      </div>
+    </div>
+
+    <div class="card" style="background-color: #1e1e24; border: 1px solid #333; margin-bottom: 16px;">
+      <div class="section-title"><h2 id="chart-title" style="color: #fff; margin-bottom: 15px;">Progresso de Gastos</h2></div>
+      <div style="position: relative; height: 400px; width: 100%;">
+        <canvas id="mainChart"></canvas>
+      </div>
+    </div>
+
+    <div class="card table-wrap">
+      <table class="table">
+        <thead><tr><th>Data/Hora</th><th>Placa</th><th>Motorista</th><th>Diesel</th><th>Litros</th><th>Valor</th><th>KM</th></tr></thead>
+        <tbody id="fuel-table-body"></tbody>
+      </table>
+    </div>`; 
+}
+
+function renderFuelCharts() {
+  try {
+    const ctx = document.getElementById('mainChart');
+    if (!ctx) return; 
+
+    // Lê direto da memória do estado ao invés do input solto
+    const startTs = state.fuelStart ? new Date(state.fuelStart + 'T00:00:00').getTime() : 0;
+    const endTs = state.fuelEnd ? new Date(state.fuelEnd + 'T23:59:59').getTime() : 9999999999999;
+    
+    const viewTypeEl = document.getElementById('fuel-chart-type');
+    const viewType = viewTypeEl ? viewTypeEl.value : 'line';
+
+    const titleEl = document.getElementById('chart-title');
+    if (titleEl) {
+      if (viewType === 'bar') titleEl.innerText = 'Gasto Real (Total por Caminhão)';
+      else if (viewType === 'line') titleEl.innerText = 'Histórico Real + Projeção Inteligente';
+      else titleEl.innerText = 'Gasto Diário vs Projeção Acumulada';
+    }
+
+    // 🛡️ TRADUTOR DE DATAS BLINDADO (Fim definitivo do "Tue O" e do bug de fuso horário)
+    function parseSafeDate(val) {
+      if (!val) return { ts: 0, text: '—', short: '—' };
+      let s = String(val).trim();
+      let ts = 0, text = s, short = s.substring(0, 5);
+      
+      const matchIso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (matchIso) {
+        ts = new Date(`${matchIso[1]}-${matchIso[2]}-${matchIso[3]}T12:00:00`).getTime();
+        text = `${matchIso[3]}/${matchIso[2]}/${matchIso[1]}`;
+        short = `${matchIso[3]}/${matchIso[2]}`;
+        return { ts, text, short };
+      }
+      
+      const matchBr = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+      if (matchBr) {
+        ts = new Date(`${matchBr[3]}-${matchBr[2]}-${matchBr[1]}T12:00:00`).getTime();
+        text = `${matchBr[1]}/${matchBr[2]}/${matchBr[3]}`;
+        short = `${matchBr[1]}/${matchBr[2]}`;
+        return { ts, text, short };
+      }
+      
+      let d = new Date(val);
+      if (!isNaN(d.getTime())) {
+        const day = String(d.getDate()).padStart(2, '0');
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const year = d.getFullYear();
+        ts = new Date(`${year}-${month}-${day}T12:00:00`).getTime();
+        text = `${day}/${month}/${year}`;
+        short = `${day}/${month}`;
+      }
+      return { ts: ts || 0, text, short };
+    }
+
+    let allFuelsRaw = [];
+    if (typeof window.data !== 'undefined' && Array.isArray(window.data.fuels)) {
+      allFuelsRaw = window.data.fuels;
+    } else if (typeof data !== 'undefined' && Array.isArray(data.fuels)) {
+      allFuelsRaw = data.fuels;
+    }
+
+    const allMappedFuels = allFuelsRaw.map(f => {
+      const pd = parseSafeDate(f.date || f.data);
+      return { ...f, _ts: pd.ts, _textDate: pd.text, _shortDate: pd.short };
+    }).sort((a, b) => a._ts - b._ts);
+
+    const filteredFuels = allMappedFuels.filter(f => {
+      if (f._ts === 0) return true; 
+      return f._ts >= startTs && f._ts <= endTs;
+    });
+
+    const tableBody = document.getElementById('fuel-table-body');
+    if (tableBody) {
+      tableBody.innerHTML = filteredFuels.map(f => {
+        const vId = f.veiculoId || f.id_veiculo;
+        const v = typeof veh === 'function' ? veh(vId) : null;
+        const placa = v ? (v.placa || v.ident) : (vId || '—');
+        const motId = f.motoristaId || f.id_motorista;
+        const motNome = (typeof driverBy === 'function' && driverBy(motId)) ? driverBy(motId).nome : 'Robô / Posto';
+        
+        return `
+          <tr>
+            <td>${f._textDate} ${f.hora || ''}</td>
+            <td><strong>${placa}</strong></td>
+            <td>${motNome}</td>
+            <td>${f.tipoDiesel || f.tipo_diesel || 'Diesel S10'}</td>
+            <td>${f.litrosDiesel || f.litros_diesel || 0} L</td>
+            <td>R$ ${Number(f.valorDiesel || f.valor_diesel || 0).toFixed(2)}</td>
+            <td>${typeof km === 'function' ? km(f.km || f.km_atual) : (f.km || 0)}</td>
+          </tr>`;
+      }).join('') || '<tr><td colspan="7" style="text-align:center; padding: 20px;">Nenhum abastecimento encontrado nesse período.</td></tr>';
+    }
+
+    const learningBaseline = {};
+    const ms60Dias = 60 * 24 * 60 * 60 * 1000;
+    const agoraTs = Date.now();
+
+    allMappedFuels.forEach(f => {
+      const vId = f.veiculoId || f.id_veiculo;
+      if (!vId) return;
+      const v = typeof veh === 'function' ? veh(vId) : null;
+      const placa = v ? (v.placa || v.ident) : ('Veículo ' + String(vId).substring(0, 5));
+
+      if (f._ts >= (agoraTs - ms60Dias)) {
+        if (!learningBaseline[placa]) {
+          learningBaseline[placa] = { totalGasto: 0, kmMin: 0, kmMax: 0, tsMin: f._ts, tsMax: f._ts, qtd: 0 };
+        }
+        const val = Number(f.valorDiesel || f.valor_diesel) || 0;
+        const kmAtual = Number(f.km || f.km_atual) || 0;
+
+        learningBaseline[placa].totalGasto += val;
+        learningBaseline[placa].qtd++;
+        if (f._ts < learningBaseline[placa].tsMin) learningBaseline[placa].tsMin = f._ts;
+        if (f._ts > learningBaseline[placa].tsMax) learningBaseline[placa].tsMax = f._ts;
+
+        if (kmAtual > 0) {
+          if (learningBaseline[placa].kmMin === 0 || kmAtual < learningBaseline[placa].kmMin) learningBaseline[placa].kmMin = kmAtual;
+          if (kmAtual > learningBaseline[placa].kmMax) learningBaseline[placa].kmMax = kmAtual;
+        }
+      }
+    });
+
+    const colors = ['#FF4C4C', '#00D2FF', '#FFD700', '#00FF7F', '#BA55D3', '#FF8C00', '#C0C0C0', '#1E90FF'];
+    const trucksData = {};
+    let colorIdx = 0;
+
+    filteredFuels.forEach(f => {
+      const vId = f.veiculoId || f.id_veiculo;
+      if (!vId) return;
+      const v = typeof veh === 'function' ? veh(vId) : null;
+      const placa = v ? (v.placa || v.ident) : ('Veículo ' + String(vId).substring(0, 5));
+      const dataCurta = f._shortDate;
+      
+      const kmAtual = Number(f.km || f.km_atual) || 0;
+
+      if (!trucksData[placa]) {
+        trucksData[placa] = { 
+          totalGasto: 0, 
+          kml: (v && typeof allVehicleMetric === 'function') ? allVehicleMetric(v.id).avg : 0, 
+          color: colors[colorIdx++ % colors.length], 
+          diario: {},
+          tsPrimeiroAbast: f._ts,
+          tsUltimoAbast: f._ts,
+          kmMin: kmAtual,
+          kmMax: kmAtual,
+          qtdAbastMes: 0
+        };
+      }
+      
+      const val = Number(f.valorDiesel || f.valor_diesel) || 0;
+      trucksData[placa].totalGasto += val;
+      trucksData[placa].qtdAbastMes++;
+
+      if (f._ts < trucksData[placa].tsPrimeiroAbast) trucksData[placa].tsPrimeiroAbast = f._ts;
+      if (f._ts > trucksData[placa].tsUltimoAbast) trucksData[placa].tsUltimoAbast = f._ts;
+
+      if (kmAtual > 0) {
+        if (trucksData[placa].kmMin === 0 || kmAtual < trucksData[placa].kmMin) trucksData[placa].kmMin = kmAtual;
+        if (kmAtual > trucksData[placa].kmMax) trucksData[placa].kmMax = kmAtual;
+      }
+
+      if (!trucksData[placa].diario[dataCurta]) trucksData[placa].diario[dataCurta] = 0;
+      trucksData[placa].diario[dataCurta] += val;
+    });
+
+    // 🎯 MUDANÇA: TIMELINE ESTRITA E PRECISA! 
+    // Gera a linha do tempo EXATAMENTE dentro do limite do filtro selecionado, nem um dia a mais nem a menos.
+    let timeline = [];
+    const baseStart = startTs > 0 ? startTs : (Date.now() - (30 * 24 * 60 * 60 * 1000));
+    const baseEnd = endTs < 9999999999999 ? endTs : Date.now();
+    
+    let iterDate = new Date(baseStart);
+    iterDate.setHours(12, 0, 0, 0); // Trava o relógio no meio-dia pra evitar bug de meia-noite
+    const limitDate = new Date(baseEnd);
+    limitDate.setHours(12, 0, 0, 0);
+    
+    while (iterDate <= limitDate) {
+      const dd = String(iterDate.getDate()).padStart(2, '0');
+      const mm = String(iterDate.getMonth() + 1).padStart(2, '0');
+      timeline.push(`${dd}/${mm}`);
+      iterDate.setDate(iterDate.getDate() + 1);
+    }
+
+    const labelsPlacas = Object.keys(trucksData);
+    const datasets = [];
+
+    if (viewType === 'bar') {
+      datasets.push({
+        type: 'bar',
+        label: 'Gasto Total',
+        data: labelsPlacas.map(p => trucksData[p].totalGasto),
+        backgroundColor: labelsPlacas.map(p => trucksData[p].color),
+        borderRadius: 4,
+        hoverBorderWidth: 2,
+        hoverBorderColor: '#fff',
+        barPercentage: 0.9, 
+        categoryPercentage: 0.95 
+      });
+    } else {
+      labelsPlacas.forEach(placa => {
+        const truck = trucksData[placa];
+        let acumulado = 0;
+        let idxUltimoDiaReal = 0;
+
+        const msHoje = Date.now();
+        const diasSemAbastecer = (msHoje - truck.tsUltimoAbast) / (1000 * 60 * 60 * 24);
+        
+        let mediaDiariaProjetada = 0;
+
+        if (diasSemAbastecer <= 5) { 
+          const kmTotalMes = Math.max(0, truck.kmMax - truck.kmMin);
+          const diasNoMes = Math.max(1, Math.ceil((truck.tsUltimoAbast - truck.tsPrimeiroAbast) / (1000 * 60 * 60 * 24)));
+          let mediaDiariaMesAtual = 0;
+          
+          if (kmTotalMes > 0) {
+            mediaDiariaMesAtual = (kmTotalMes / diasNoMes) * (truck.totalGasto / kmTotalMes);
+          } else {
+            mediaDiariaMesAtual = truck.totalGasto / diasNoMes;
+          }
+
+          const baseH = learningBaseline[placa];
+          let mediaDiariaHistorica = mediaDiariaMesAtual;
+          if (baseH && baseH.qtd > 1) {
+            const diasH = Math.max(1, Math.ceil((baseH.tsMax - baseH.tsMin) / (1000 * 60 * 60 * 24)));
+            const kmH = (baseH.kmMax > baseH.kmMin) ? (baseH.kmMax - baseH.kmMin) : 0;
+            if (kmH > 0) {
+              mediaDiariaHistorica = (kmH / diasH) * (baseH.totalGasto / kmH);
+            } else {
+              mediaDiariaHistorica = baseH.totalGasto / diasH;
+            }
+          }
+
+          if (truck.qtdAbastMes <= 2) {
+            mediaDiariaProjetada = (mediaDiariaHistorica * 0.8) + (mediaDiariaMesAtual * 0.2);
+          } else {
+            mediaDiariaProjetada = (mediaDiariaMesAtual * 0.6) + (mediaDiariaHistorica * 0.4);
+          }
+        }
+
+        timeline.forEach((d, idx) => {
+          if (truck.diario[d] !== undefined) {
+            idxUltimoDiaReal = idx;
+          }
+        });
+
+        let ultimoAcumuladoReal = 0;
+        const dadosContinuos = timeline.map((d, idx) => {
+          if (idx <= idxUltimoDiaReal) {
+            if (truck.diario[d] !== undefined) {
+              acumulado += truck.diario[d];
+            }
+            ultimoAcumuladoReal = acumulado;
+            return acumulado;
+          } else {
+            const diasFuturos = idx - idxUltimoDiaReal;
+            const valorProjetado = ultimoAcumuladoReal + (mediaDiariaProjetada * diasFuturos);
+            return Math.round(valorProjetado * 100) / 100;
+          }
+        });
+
+        if (viewType === 'mixed') {
+          const dataDiaria = timeline.map(d => truck.diario[d] || 0);
+          datasets.push({
+            type: 'bar',
+            label: placa + ' (Dia)',
+            data: dataDiaria,
+            backgroundColor: truck.color,
+            borderRadius: 3,
+            placaRef: placa,
+            barPercentage: 1.0,
+            categoryPercentage: 1.0
+          });
+        }
+
+        datasets.push({
+          type: 'line',
+          label: placa,
+          data: dadosContinuos,
+          borderColor: truck.color,
+          backgroundColor: truck.color,
+          borderWidth: 2,
+          tension: 0.1,
+          pointRadius: ctx => (ctx.dataIndex !== undefined && ctx.dataIndex <= idxUltimoDiaReal ? 3 : 1),
+          pointHoverRadius: 7,
+          placaRef: placa,
+          idxUltimoReal: idxUltimoDiaReal,
+          segment: {
+            borderDash: ctx => (ctx.p0DataIndex !== undefined && ctx.p0DataIndex >= idxUltimoDiaReal ? [6, 6] : undefined)
+          }
+        });
+      });
+    }
+
+    if (mainFuelChart) {
+      mainFuelChart.destroy();
+      mainFuelChart = null;
+    }
+
+    if (window.Chart && typeof glowPlugin !== 'undefined') {
+      try { Chart.register(glowPlugin); } catch(e) {}
+    }
+
+    const customTooltip = {
+      backgroundColor: 'rgba(20, 20, 25, 0.95)',
+      titleColor: '#fff',
+      bodyColor: '#ddd',
+      borderColor: '#444',
+      borderWidth: 1,
+      callbacks: {
+        label: function(context) {
+          const valor = context.raw.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+
+          // 1. Se for o Gráfico APENAS de Barras (Gasto Total)
+          if (viewType === 'bar') {
+            const placa = context.label;
+            const kml = (trucksData[placa] && trucksData[placa].kml) ? trucksData[placa].kml.toFixed(2) + ' km/L' : 'Sem dados';
+            return ` Gasto Total: ${valor}  |  Média: ${kml}`;
+          }
+
+          const placa = context.dataset.placaRef || context.dataset.label;
+
+          // 2. Se for uma BARRA dentro do Gráfico Misto (Gasto do Dia)
+          if (context.dataset.type === 'bar') {
+            return ` ${placa} (Gasto no Dia): ${valor}`;
+          }
+
+          // 3. Se for uma LINHA (Acumulado ou Projeção)
+          const isFuturo = context.dataIndex > (context.dataset.idxUltimoReal || 0);
+          const tipoLabel = isFuturo ? '🔮 Projeção Aprendida' : 'Real Acumulado';
+          
+          return ` ${placa} (${tipoLabel}): ${valor}`;
+        }
+      }
+    };
+
+    mainFuelChart = new Chart(ctx.getContext('2d'), {
+      data: {
+        labels: viewType === 'bar' ? labelsPlacas : timeline,
+        datasets: datasets
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+          mode: 'nearest',
+          // 🎯 CORRIGIDO: Agora exige que o mouse ENCOSTE fisicamente no ponto/linha (true)
+          intersect: true
+        },
+        plugins: {
+          legend: {
+            display: viewType !== 'bar',
+            position: 'left',
+            labels: { color: '#ccc', usePointStyle: true, boxWidth: 8 },
+            onHover: (e, legendItem, legend) => {
+              const chart = legend.chart;
+              if (chart) {
+                const dsIndex = legendItem.datasetIndex;
+                const ds = chart.data.datasets[dsIndex];
+                
+                // 🎯 A CORREÇÃO: Em vez de acender só o 'index: 0', 
+                // mapeia e acende TODOS os dias que esse caminhão tem no gráfico de uma vez!
+                const elementsToActive = ds.data.map((_, i) => ({ datasetIndex: dsIndex, index: i }));
+                
+                chart.setActiveElements(elementsToActive);
+                chart.update();
+              }
+            },
+            onLeave: (e, legendItem, legend) => {
+              const chart = legend.chart;
+              if (chart) {
+                chart.setActiveElements([]);
+                chart.update();
+              }
+            }
+          },
+          tooltip: customTooltip
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            grid: { color: 'rgba(255, 255, 255, 0.1)', borderDash: [5, 5] },
+            ticks: { color: '#aaa', callback: (val) => 'R$ ' + val }
+          },
+          x: {
+            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+            ticks: { color: '#aaa' }
+          }
+        }
+      }
+    });
+  } catch (err) {
+    console.error("Erro ao renderizar gráficos de abastecimento:", err);
+  }
 }
 
 // Iniciação
